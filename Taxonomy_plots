@@ -1,0 +1,97 @@
+library(phyloseq)
+library(dplyr)
+library(ggplot2)
+library(rlang)
+
+setwd("PATH")
+ps <- readRDS("./ASV_tables/For_use/my_phyloseq_object.rds")
+
+
+### set the variable and level of the plot:
+ps_obj <- ps          # Change if you subset, use 'ps' for whole dataset
+variable_name <- "Site"   # must be a variable in you metadata
+level_name <- "Genus"      # the desired taxonomic rank
+cutoff <- 0.9               # set to 90% of total abundance
+out_dir <- "./Taxonomy_plots"
+
+### Function to plot abundance wrapped by sample type
+plot_tax_abundance_pdf <- function(ps, variable, level, abundance_cutoff, outdir) {
+  colors <- c(
+    "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
+    "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf",
+    "#a6cee3", "#1f78b4", "#b2df8a", "#33a02c", "#78e",
+    "#e31a1c", "#fdbf6f", "#f00", "#cab2d6", "#6a3d9a",
+    "#ffff99", "#b15928", "#ffd92f", "#b3b3b3", "#ccebc5",
+    "#decbe4", "#fed9a6", "#ffffcc", "#e5d8bd", "#32e",
+    "yellow", "#e6194b", "#3cb44b", "#ffe119", "#0082c8",
+    "#f58231", "#911eb4", "#46f0f0", "#f032e6", "#d2f53c",
+    "#fabebe", "#008080", "#e6beff", "#aa6e28", "#800000",
+    "#aaffc3", "#808000", "#ffd8b1", "#000080", "#808080",
+    "#032bec", "#000000", "#7cfc00", "#40e0d0", "#6495ed",
+    "#ff4500", "#32cd32", "#8a2be2", "#ff1493", "#00ff7f",
+    "#dc143c", "#ffd700", "#ff69b4", "#00ced1", "#9932cc",
+    "#ff6347"
+  )
+  ps_melted <- phyloseq::psmelt(ps)
+  var_sym   <- sym(variable)
+  level_sym <- sym(level)
+  # Relative abundance per group
+  ps_melted <- ps_melted %>% group_by(!!var_sym) %>% mutate(RelativeAbundance = Abundance / sum(Abundance)) %>% ungroup()
+  # Mean relative abundance per group + taxonomic level
+  grouped_abundance <- ps_melted %>% group_by(!!var_sym, !!level_sym) %>% summarize(
+      MeanRelAbundance = mean(RelativeAbundance),
+      .groups = "drop"
+    )
+  # Identify top taxa accounting for X% abundance
+  top_taxa <- ps_melted %>% group_by(!!level_sym) %>% summarize(GlobalAbundance = sum(Abundance), .groups = "drop") %>%
+    arrange(desc(GlobalAbundance)) %>% mutate(RelativeAbundance = GlobalAbundance / sum(GlobalAbundance),
+      CumulativeAbundance = cumsum(RelativeAbundance)) %>% filter(CumulativeAbundance <= abundance_cutoff) %>% pull(!!level_sym)
+  # Collapse low-abundance taxa into "Other"
+  grouped_abundance <- grouped_abundance %>% mutate(
+      !!level_sym := if_else(
+        !!level_sym %in% top_taxa,
+        as.character(!!level_sym),
+        "Other"
+      )
+    ) %>% group_by(!!var_sym, !!level_sym) %>% summarize(
+      MeanRelAbundance = sum(MeanRelAbundance),
+      .groups = "drop"
+    )
+  # Renormalize so each bar sums to 1
+  grouped_abundance <- grouped_abundance %>% group_by(!!var_sym) %>% mutate(
+      NormalizedRelAbundance = MeanRelAbundance / sum(MeanRelAbundance)
+    ) %>% ungroup()
+  # Output filename
+  outfile <- file.path(outdir, paste0(tolower(level), "_abundance_grouped_by_", variable, "_of_top_", cutoff, "_percent.pdf"))
+  # Plot
+  p <- ggplot(grouped_abundance, aes(x = !!var_sym, y = NormalizedRelAbundance, fill = !!level_sym)
+  ) +
+    geom_bar(stat = "identity", position = "stack") + labs(x = variable, y = "Relative Abundance", fill = level,
+      title = paste("Taxonomic Composition by", level, "(Relative Abundance)")) + theme(axis.text.x = element_text(angle = 45, hjust = 1)
+    ) + scale_fill_manual(values = colors)
+  # Save as PDF
+  ggsave(filename = outfile, plot = p, width = 10, height = 7, units = "in")
+  return(p)
+}
+
+##Call the function
+plot_tax_abundance_pdf(
+     ps               = ps_obj,
+     variable         = variable_name,
+     level            = level_name,
+     abundance_cutoff = cutoff,
+     outdir = out_dir
+   )
+
+
+
+
+
+
+
+
+
+
+
+
+
