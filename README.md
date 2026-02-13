@@ -1,5 +1,5 @@
 # Gut Microbiota Analyses in Melipona Bees
-
+[![DOI](https://zenodo.org/badge/1157461999.svg)](https://doi.org/10.5281/zenodo.18637159)
 This repository contains all scripts and workflows used for the microbiome analyses described in our manuscript.  
 All analyses were conducted in **R v4.5.1** and rely on a set of specialized packages for sequence processing, diversity analyses, differential abundance testing, functional prediction, and network inference.
 
