@@ -1,0 +1,224 @@
+
+####Alpha diversity:
+# Load Packages
+library(phyloseq)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(forcats)
+library(multcompView)
+library(emmeans)
+library(multcomp)
+library(ggpubr)
+
+# Load ps object
+ps <- readRDS("my_phyloseq_object.rds")
+####Alpha diversity:
+# Prepare data
+prepare_alpha_diversity_df <- function(ps, measures = c("Shannon", "Simpson", "Observed", "Chao1")) {
+  
+  library(phyloseq)
+  library(dplyr)
+  library(tibble)
+  
+  # Alpha diversity
+  alpha_df <- estimate_richness(ps, measures = measures) %>%
+    rownames_to_column("Sample")
+  
+  # Metadata (robust extraction)
+  metadata_df <- sample_data(ps) %>%
+    as.matrix() %>%
+    as.data.frame() %>%
+    rownames_to_column("Sample")
+  
+  # Library size
+  libsize_df <- data.frame(
+    Sample = sample_names(ps),
+    LibrarySize = sample_sums(ps)
+  ) %>%
+    mutate(Log_LibrarySize = log10(LibrarySize))
+  
+  # Ensure consistent Sample IDs
+  metadata_df$Sample <- gsub("-", ".", metadata_df$Sample)
+  libsize_df$Sample  <- gsub("-", ".", libsize_df$Sample)
+  
+  # Merge all
+  alpha_df %>%
+    left_join(metadata_df, by = "Sample") %>%
+    left_join(libsize_df, by = "Sample")
+}
+# Call function to prepare data
+alpha_df <- prepare_alpha_diversity_df(ps)
+
+## Set parameters:
+response <- "Shannon"    # Change to desired response (e.g. Simpson, Chao1...)
+g_var <- "Height"        # Change to desired variable in your metadata
+out_pref <- paste(response, "_by_", g_var)   # Prefix for output files
+dataframe <- alpha_df    # Change to specific dataframe in case you subset by groups
+out_dir <- "plots/Alpha_diversity" # Output directory
+
+# Diagnostics
+run_alpha_diagnostics <- function(df, Metric, Variable, prefix, outdir) {
+  
+  library(ggplot2)
+  library(dplyr)
+  library(ggpubr)
+  library(car)
+  # Ensure output directory exists
+  if (!dir.exists(outdir)) {
+    dir.create(outdir, recursive = TRUE)
+  }
+  metric_sym   <- rlang::sym(Metric)
+  variable_sym <- rlang::sym(Variable)
+  # Histogram
+  ggsave(
+    paste0(outdir, prefix, "_histogram.pdf"),
+    ggplot(df, aes(x = !!metric_sym)) +
+      geom_histogram(bins = 10, fill = "steelblue", color = "black") +
+      facet_wrap(vars(!!variable_sym), scales = "free") +
+      labs(title = paste("Histogram of", Metric)),
+    width = 8, height = 6
+  )
+  # QQ plot
+  ggsave(
+    paste0(outdir, prefix, "_qqplot.pdf"),
+    ggqqplot(df[[Metric]], title = paste("QQ plot of", Metric)),
+    width = 6, height = 6
+  )
+  # Shapiro per group
+  shapiro_df <- df %>%
+    group_by(!!variable_sym) %>%
+    filter(n() >= 3) %>%
+    summarise(
+      p_value = shapiro.test(.data[[Metric]])$p.value,
+      .groups = "drop"
+    )
+  write.csv(
+    shapiro_df,
+    file.path(outdir, paste0(prefix, "_shapiro.csv")),
+    row.names = FALSE
+  )
+  # Levene test
+  levene <- leveneTest(
+    df[[Metric]] ~ as.factor(df[[Variable]])
+  )
+  capture.output(
+    levene,
+    file = file.path(outdir, paste0(prefix, "_levene.txt"))
+  )
+  invisible(list(shapiro = shapiro_df, levene = levene))
+}
+# Call function to run diagnostics
+run_alpha_diagnostics(df = dataframe, Metric = response, Variable = g_var, prefix = out_pref, outdir = out_dir)
+
+# ANCOVA
+run_alpha_ancova <- function(df, Metric, Variable, prefix, outdir) {
+  
+  library(dplyr)
+  library(ggplot2)
+  library(emmeans)
+  library(multcompView)
+  message("Running ANCOVA: ", prefix)
+  # Ensure output directory exists
+  if (!dir.exists(outdir)) {
+    dir.create(outdir, recursive = TRUE)
+  }
+  df <- df %>%
+    filter(!is.na(.data[[Metric]]),
+           !is.na(.data[[Variable]]),
+           !is.na(Log_LibrarySize)) %>%
+    mutate(
+      !!Variable := factor(.data[[Variable]])
+    )
+  # ANCOVA
+  formula <- as.formula(
+    paste0(Metric, " ~ ", Variable, " + Log_LibrarySize")
+  )
+  model <- aov(formula, data = df)
+  capture.output(
+    summary(model),
+    file = file.path(outdir, paste0(prefix, "_ANCOVA_summary.txt"))
+  )
+  # EMMEANS
+  emm <- emmeans(model, as.formula(paste("~", Variable)))
+  write.csv(
+    as.data.frame(contrast(emm, method = "pairwise")),
+    file.path(outdir, paste0(prefix, "_pairwise_contrasts.csv")),
+    row.names = FALSE
+  )
+  # CLD
+  cld_df <- cld(
+    emm,
+    alpha = 0.05,
+    Letters = letters,
+    adjust = "tukey"
+  ) %>%
+    as.data.frame() %>%
+    mutate(Letters = gsub(" ", "", .group)) %>%
+    select(all_of(Variable), Letters)
+  write.csv(
+    cld_df,
+    file.path(outdir, paste0(prefix, "_CLD_letters.csv")),
+    row.names = FALSE
+  )
+  plot_df <- left_join(as.data.frame(emm), cld_df, by = Variable)
+  # Plot
+  p <- ggplot(df, aes_string(x = Variable, y = Metric, fill = Variable)) +
+    geom_boxplot(alpha = 0.4, width = 0.7) +
+    geom_point(data = plot_df,
+               aes_string(x = Variable, y = "emmean"),
+               size = 4) +
+    geom_text(data = plot_df,
+              aes_string(x = Variable,
+                         y = "emmean + 0.15",
+                         label = "Letters"),
+              size = 6,
+              fontface = "bold") +
+    theme_minimal(base_size = 14) +
+    theme(
+      legend.position = "none",
+      axis.text.x = element_text(angle = 45, hjust = 1)
+    ) +
+    labs(
+      title = paste("ANCOVA-adjusted", Metric),
+      y = Metric
+    )
+  ggsave(filename = file.path(outdir, paste0(prefix, "_plot.png")), p, width = 7, height = 5, dpi = 300)
+  ggsave(filename = file.path(outdir, paste0(prefix, "_plot.pdf")), p, width = 7, height = 5)
+  message("Finished: ", prefix)
+  invisible(list(model = model, emm = emm, plot = p))
+}
+# Call function to run ANCOVA
+run_alpha_ancova( df = dataframe, Metric = response, Variable = g_var, prefix = out_pref, outdir = out_dir)
+
+
+
+
+### In case you need to subset by groups:
+
+# 1. Simple Stage Progression (all species)
+subset_SSP <- alpha_df %>%
+  filter(Age %in% c("Larva", "Nurse", "Forrager"))
+
+# 2. Stage progression – only M. mondury
+subset_SPS_M <- alpha_df %>%
+  filter(Age %in% c("Larva", "Nurse", "Forrager"),
+         Species == "M_mondury")
+
+# 3. Stage progression – only M. capixaba
+subset_SPS_C <- alpha_df %>%
+  filter(Age %in% c("Larva", "Nurse", "Forrager"),
+         Species == "M_capixaba")
+
+# 4. Including Honey → Larva → Nurse → Forrager
+subset_FE <- alpha_df %>%
+  filter(Age %in% c("Honey", "Larva", "Nurse", "Forrager"))
+
+# 5. All castes of M. mondury (queen groups separated)
+subset_AQQ <- alpha_df %>%
+  filter(Caste %in% c("Worker", "Larva", "Virgin_queen", 
+                      "Physo_queen", "Male"))
+
+# 6. Caste groups: Worker, Larvae, Queen, Male (M. mondury)
+subset_AQ <- alpha_df %>%
+  filter(Caste_merged %in% c("Worker", "Larva", "Queen", "Male"))
