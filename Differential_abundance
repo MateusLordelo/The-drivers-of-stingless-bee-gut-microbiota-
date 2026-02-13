@@ -1,0 +1,388 @@
+library(phyloseq)
+library(DESeq2)
+library(dplyr)
+library(ANCOMBC)
+
+# Load object
+setwd("PATH")
+ps <- readRDS("./ASV_tables/For_use/my_phyloseq_object.rds")
+
+library(phyloseq)
+library(DESeq2)
+library(dplyr)
+
+# Collapse to genus level (optional, makes interpretation easier)
+ps_genus <- tax_glom(ps, taxrank = "Genus")
+# OPTIONAL: remove "unclassified" genera to avoid clutter -> do that if you haven't previously. I had not
+ps_genus <- subset_taxa(ps_genus, !is.na(Genus) & Genus != "")
+
+# Function to run DESeq2 and extract results
+run_deseq <- function(ps_obj, design_formula, contrast_vector, shrink=TRUE) {
+  dds <- phyloseq_to_deseq2(ps_obj, design_formula)
+  dds <- DESeq(dds)
+  
+  res <- results(dds, contrast = contrast_vector)
+  
+  if (shrink) {
+    res <- lfcShrink(dds, contrast = contrast_vector, res = res, type = "ashr")
+  }
+  
+  res <- as.data.frame(res[order(res$padj), ])
+  res$Genus_label <- as.character(tax_table(ps_obj)[rownames(res), "Genus"])  # <- fix
+  return(res)
+}
+
+
+
+#A. Foragers vs Nurses (Workers only, across species)
+ps_A <- subset_samples(ps_genus, Caste == "Worker" & Age %in% c("Forrager","Nurse"))
+ps_A <- prune_taxa(taxa_sums(ps_A) > 0, ps_A)
+
+res_A <- run_deseq(
+  ps_A,
+  design_formula = ~ Species + Age,
+  contrast_vector = c("Age", "Forrager", "Nurse")
+)
+
+# Export as CSV
+write.csv(res_A, "DESeq2_Foragers_vs_Nurses_genus.csv", row.names = TRUE)
+
+#B. Workers vs Larvae (overall + per species)
+
+# Overall
+ps_B <- subset_samples(ps_genus, (Caste == "Worker" & Stage == "Adult") | Stage == "Larva")
+ps_B <- prune_taxa(taxa_sums(ps_B) > 0, ps_B)
+
+res_B_all <- run_deseq(
+  ps_B,
+  design_formula = ~ Species + Stage,
+  contrast_vector = c("Stage", "Adult", "Larva")
+)
+
+# Per species
+ps_B_capixaba <- subset_samples(ps_B, Species == "M_capixaba")
+ps_B_capixaba <- prune_taxa(taxa_sums(ps_B_capixaba) > 0, ps_B_capixaba)
+res_B_capixaba <- run_deseq(
+  ps_B_capixaba,
+  design_formula = ~ Stage,
+  contrast_vector = c("Stage", "Adult", "Larva")
+)
+
+ps_B_mondury <- subset_samples(ps_B, Species == "M_mondury")
+ps_B_mondury <- prune_taxa(taxa_sums(ps_B_mondury) > 0, ps_B_mondury)
+res_B_mondury <- run_deseq(
+  ps_B_mondury,
+  design_formula = ~ Stage,
+  contrast_vector = c("Stage", "Adult", "Larva")
+)
+
+write.csv(res_B_all, "DESeq2_Workers_vs_Larvae_all_genus.csv", row.names = TRUE)
+write.csv(res_B_capixaba, "DESeq2_Workers_vs_Larvae_capixaba_genus.csv", row.names = TRUE)
+write.csv(res_B_mondury, "DESeq2_Workers_vs_Larvae_mondury_genus.csv", row.names = TRUE)
+
+#C. Species effect (workers + larvae only)
+ps_C <- subset_samples(ps_genus, (Caste == "Worker" & Stage == "Adult") | Stage == "Larva")
+ps_C <- prune_taxa(taxa_sums(ps_C) > 0, ps_C)
+
+res_C <- run_deseq(
+  ps_C,
+  design_formula = ~ Stage + Species,
+  contrast_vector = c("Species", "M_mondury", "M_capixaba")
+)
+
+write.csv(res_C, "DESeq2_Species_effect_genus.csv", row.names = TRUE)
+
+#D. Workers vs Males (M_mondury only)
+ps_D <- subset_samples(ps_genus, Species == "M_mondury" & 
+                         ((Caste == "Worker" & Stage == "Adult") | Caste == "Male"))
+ps_D <- prune_taxa(taxa_sums(ps_D) > 0, ps_D)
+
+res_D <- run_deseq(
+  ps_D,
+  design_formula = ~ Caste,
+  contrast_vector = c("Caste", "Worker", "Male")
+)
+
+write.csv(res_D, "DESeq2_Workers_vs_Males_genus.csv", row.names = TRUE)
+
+#E. Queens vs Males (M_mondury only)
+# Recode queens (Physo + Virgin) as "Queen"
+sample_data(ps_genus)$QueenGroup <- as.character(sample_data(ps_genus)$Caste)
+sample_data(ps_genus)$QueenGroup[sample_data(ps_genus)$QueenGroup %in% 
+                                   c("Physo-queen","Virgin_queen")] <- "Queen"
+
+ps_E <- subset_samples(ps_genus, Species == "M_mondury" & 
+                         QueenGroup %in% c("Queen","Male"))
+ps_E <- prune_taxa(taxa_sums(ps_E) > 0, ps_E)
+
+res_E <- run_deseq(
+  ps_E,
+  design_formula = ~ QueenGroup,
+  contrast_vector = c("QueenGroup", "Queen", "Male")
+)
+
+write.csv(res_E, "DESeq2_Queens_vs_Males_genus.csv", row.names = TRUE)
+
+
+#F. Queens vs Workers (M_mondury only)
+ps_F <- subset_samples(ps_genus, Species == "M_mondury" & 
+                         QueenGroup %in% c("Queen","Worker"))
+ps_F <- prune_taxa(taxa_sums(ps_F) > 0, ps_F)
+
+res_F <- run_deseq(
+  ps_F,
+  design_formula = ~ QueenGroup,
+  contrast_vector = c("QueenGroup", "Queen", "Worker")
+)
+
+write.csv(res_F, "DESeq2_Queens_vs_Workers_genus.csv", row.names = TRUE)
+
+
+#G. Queens vs Larvae (M_mondury only)
+
+ps_G <- subset_samples(ps_genus, Species == "M_mondury" & 
+                         (QueenGroup == "Queen" | Stage == "Larva"))
+ps_G <- prune_taxa(taxa_sums(ps_G) > 0, ps_G)
+
+res_G <- run_deseq(
+  ps_G,
+  design_formula = ~ QueenGroup,   # Here "QueenGroup" has Queen + Larva
+  contrast_vector = c("QueenGroup", "Queen", "Larva")
+)
+
+write.csv(res_G, "DESeq2_Queens_vs_Larvae_genus.csv", row.names = TRUE)
+
+library(phyloseq)
+library(dplyr)
+library(ANCOMBC)   # or library(ANCOMBC2) depending on your installation
+
+# use the same ps_genus you created earlier, or create again
+ps_genus <- tax_glom(ps, taxrank = "Genus")
+ps_genus <- subset_taxa(ps_genus, !is.na(Genus) & Genus != "")
+ps_genus <- prune_taxa(taxa_sums(ps_genus) > 0, ps_genus)
+
+
+###### super function to loop through the analysis and save it all
+
+
+run_ancombc2_and_export <- function(ps_obj,
+                                    fix_formula,
+                                    group_var = NULL,
+                                    pairwise = FALSE,
+                                    out_prefix = "ANCOMBC_result",
+                                    p_adj_method = "fdr",
+                                    prv_cut = 0.10,
+                                    lib_cut = 0,
+                                    s0_perc = 0.05,
+                                    n_cl = 1,
+                                    alpha = 0.05,
+                                    tax_level) {
+  # ps_obj: phyloseq object (ideally already collapsed to genus if you want genus-level)
+  # fix_formula: character string, e.g. "Species + Age"  (must include group_var if group_var not NULL)
+  # group_var: the discrete group variable name if you want pairwise/global tests
+  # pairwise: logical, do pairwise directional tests (useful if group_var has >2 levels)
+  #
+  # returns a list with ANCOM outputs and writes CSVs to WD with prefix out_prefix
+  
+  # run ANCOM-BC2
+  ancom_res <- ancombc2(
+    data = ps_obj,
+    assay.type = "counts",
+    tax_level = tax_level,    # since ps_obj is genus-collapsed this is safe; if using ASV-level you can still set tax_level="Genus" if taxonomy present
+    fix_formula = fix_formula,
+    rand_formula = NULL,
+    p_adj_method = p_adj_method,
+    prv_cut = prv_cut,
+    lib_cut = lib_cut,
+    s0_perc = s0_perc,
+    group = group_var,
+    pairwise = pairwise,
+    global = FALSE,
+    dunnet = FALSE,
+    trend = FALSE,
+    n_cl = n_cl,
+    alpha = alpha,
+    verbose = TRUE
+  )
+  
+  # Primary per-taxon results
+  res_df <- ancom_res$res
+  # If pairwise was requested and produced results, extract res_pair
+  res_pair_df <- NULL
+  if (pairwise && !is.null(ancom_res$res_pair)) {
+    res_pair_df <- ancom_res$res_pair
+  }
+  
+  # Tidy the main results: add genus column if not present
+  if (!("taxon" %in% colnames(res_df)) && !is.null(tax_table(ps_obj))) {
+    # ensure rownames correspond to genus/taxon names
+    res_df$Genus <- rownames(res_df)
+  }
+  
+  # Convert natural log fold-changes to log2 (optional)
+  # find columns that start with 'lfc' and convert a copy to log2
+  lfc_cols <- grep("^lfc", colnames(res_df), value = TRUE)
+  if (length(lfc_cols) > 0) {
+    for (cname in lfc_cols) {
+      newname <- paste0(cname, "_log2")
+      res_df[[newname]] <- res_df[[cname]] / log(2)
+    }
+  }
+  
+  # Export main table
+  csv_main <- paste0(out_prefix, "_main.csv")
+  write.csv(res_df, csv_main, row.names = TRUE)
+  message("Wrote: ", csv_main)
+  
+  # Export pairwise if present
+  if (!is.null(res_pair_df)) {
+    csv_pair <- paste0(out_prefix, "_pairwise.csv")
+    write.csv(res_pair_df, csv_pair, row.names = TRUE)
+    message("Wrote: ", csv_pair)
+  }
+  
+  # Return the raw ANCOM object and exported tables
+  return(list(ancom_raw = ancom_res, main = res_df, pairwise = res_pair_df))
+}
+
+
+
+####### Here we call the function
+
+
+
+# A. Foragers vs Nurses (Workers only)
+ps_A <- subset_samples(ps_genus, Caste == "Worker" & Age %in% c("Forrager","Nurse"))
+ps_A <- prune_taxa(taxa_sums(ps_A) > 0, ps_A)
+res_ancom_A <- run_ancombc2_and_export(
+  ps_obj = ps_A,
+  fix_formula = "Species + Age",
+  group_var = "Age",
+  pairwise = FALSE,            # two-group contrast; pairwise not necessary
+  out_prefix = "ANCOMBC_Foragers_vs_Nurses",
+  p_adj_method = "fdr",
+  prv_cut = 0.10,
+  tax_level = "Genus"
+)
+
+# B. Workers vs Larvae (overall)
+ps_B <- subset_samples(ps_genus, (Caste == "Worker" & Stage == "Adult") | Stage == "Larva")
+ps_B <- prune_taxa(taxa_sums(ps_B) > 0, ps_B)
+res_ancom_B_all <- run_ancombc2_and_export(
+  ps_obj = ps_B,
+  fix_formula = "Species + Stage",
+  group_var = "Stage",
+  pairwise = FALSE,
+  out_prefix = "ANCOMBC_Workers_vs_Larvae_all",
+  p_adj_method = "fdr",
+  prv_cut = 0.10,
+  tax_level = "Genus"
+)
+
+# B - per species: Capixaba
+ps_B_cap <- subset_samples(ps_B, Species == "M_capixaba")
+ps_B_cap <- prune_taxa(taxa_sums(ps_B_cap) > 0, ps_B_cap)
+res_ancom_B_cap <- run_ancombc2_and_export(
+  ps_obj = ps_B_cap,
+  fix_formula = "Stage",
+  group_var = "Stage",
+  pairwise = FALSE,
+  out_prefix = "ANCOMBC_Workers_vs_Larvae_Capixaba",
+  p_adj_method = "fdr",
+  prv_cut = 0.10,
+  tax_level = "Genus"
+)
+
+# B - per species: Mondury
+ps_B_mon <- subset_samples(ps_B, Species == "M_mondury")
+ps_B_mon <- prune_taxa(taxa_sums(ps_B_mon) > 0, ps_B_mon)
+res_ancom_B_mon <- run_ancombc2_and_export(
+  ps_obj = ps_B_mon,
+  fix_formula = "Stage",
+  group_var = "Stage",
+  pairwise = FALSE,
+  out_prefix = "ANCOMBC_Workers_vs_Larvae_Mondury",
+  p_adj_method = "fdr",
+  prv_cut = 0.10,
+  tax_level = "Genus"
+)
+
+# C. Species effect (workers + larvae only)
+ps_C <- subset_samples(ps_genus, (Caste == "Worker" & Stage == "Adult") | Stage == "Larva")
+ps_C <- prune_taxa(taxa_sums(ps_C) > 0, ps_C)
+res_ancom_C <- run_ancombc2_and_export(
+  ps_obj = ps_C,
+  fix_formula = "Stage + Species",
+  group_var = "Species",
+  pairwise = FALSE,
+  out_prefix = "ANCOMBC_Species_effect",
+  p_adj_method = "fdr",
+  prv_cut = 0.10,
+  tax_level = "Genus"
+)
+
+# D. Workers vs Males (M_mondury only)
+ps_D <- subset_samples(ps_genus, Species == "M_mondury" &
+                         ((Caste == "Worker" & Stage == "Adult") | Caste == "Male"))
+ps_D <- prune_taxa(taxa_sums(ps_D) > 0, ps_D)
+res_ancom_D <- run_ancombc2_and_export(
+  ps_obj = ps_D,
+  fix_formula = "Caste",
+  group_var = "Caste",
+  pairwise = FALSE,
+  out_prefix = "ANCOMBC_Workers_vs_Males_Mondury",
+  p_adj_method = "fdr",
+  prv_cut = 0.10,
+  tax_level = "Genus"
+)
+
+# E. Queens vs Males (M_mondury only) - recode QueenGroup
+sd_all <- as.data.frame(sample_data(ps_genus))
+sd_all$QueenGroup <- sd_all$Caste
+sd_all$QueenGroup[sd_all$QueenGroup %in% c("Physo-queen","Virgin_queen")] <- "Queen"
+sample_data(ps_genus) <- sample_data(ps_genus)  # keep ps_genus original
+# Recreate subset using the recoded variable
+ps_temp <- ps_genus
+sample_data(ps_temp)$QueenGroup <- sd_all$QueenGroup
+
+ps_E <- subset_samples(ps_temp, Species == "M_mondury" & QueenGroup %in% c("Queen","Male"))
+ps_E <- prune_taxa(taxa_sums(ps_E) > 0, ps_E)
+res_ancom_E <- run_ancombc2_and_export(
+  ps_obj = ps_E,
+  fix_formula = "QueenGroup",
+  group_var = "QueenGroup",
+  pairwise = FALSE,
+  out_prefix = "ANCOMBC_Queens_vs_Males_Mondury",
+  p_adj_method = "fdr",
+  prv_cut = 0.10,
+  tax_level = "Genus"
+)
+
+# F. Queens vs Workers (M_mondury only)
+ps_F <- subset_samples(ps_temp, Species == "M_mondury" & QueenGroup %in% c("Queen","Worker"))
+ps_F <- prune_taxa(taxa_sums(ps_F) > 0, ps_F)
+res_ancom_F <- run_ancombc2_and_export(
+  ps_obj = ps_F,
+  fix_formula = "QueenGroup",
+  group_var = "QueenGroup",
+  pairwise = FALSE,
+  out_prefix = "ANCOMBC_Queens_vs_Workers_Mondury",
+  p_adj_method = "fdr",
+  prv_cut = 0.10,
+  tax_level = "Genus"
+)
+
+# G. Queens vs Larvae (M_mondury only)
+ps_G <- subset_samples(ps_temp, Species == "M_mondury" & (QueenGroup == "Queen" | Stage == "Larva"))
+ps_G <- prune_taxa(taxa_sums(ps_G) > 0, ps_G)
+res_ancom_G <- run_ancombc2_and_export(
+  ps_obj = ps_G,
+  fix_formula = "QueenGroup",
+  group_var = "QueenGroup",
+  pairwise = FALSE,
+  out_prefix = "ANCOMBC_Queens_vs_Larvae_Mondury",
+  p_adj_method = "fdr",
+  prv_cut = 0.10,
+  tax_level = "Genus"
+)
+
