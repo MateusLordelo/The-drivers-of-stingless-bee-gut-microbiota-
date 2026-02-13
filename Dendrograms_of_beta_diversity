@@ -1,0 +1,55 @@
+########## saving dendrograms of beta diversity:
+
+library(phyloseq)
+library(ape)
+library(ggtree)
+library(ggplot2)
+
+plot_grouped_dendrogram_final <- function(ps, group_var, method = "bray") {
+  #' Generates a dendrogram collapsed by a group variable,
+  #' showing uniform arm branches (phylogram style) and original distances as labels.
+  #'
+  #' @param ps A phyloseq object.
+  #' @param group_var The name of the metadata column to collapse samples by (e.g., "Age").
+  #' @param method The distance method (e.g., "bray" for Bray-Curtis).
+  
+  # 1. Collapse by metadata
+  ps_grouped <- phyloseq::merge_samples(ps, group_var)
+  
+  # Set the new sample names (group_var values) as the row names
+  sample_data(ps_grouped)[[group_var]] <- rownames(sample_data(ps_grouped))
+  
+  # 2. Distance and Clustering
+  dist_mat <- phyloseq::distance(ps_grouped, method = method)
+  hc <- hclust(dist_mat, method = "average") # Hierarchical Clustering
+  phy <- as.phylo(hc) # Convert to ape::phylo object
+  
+  # 3. Plotting with ggtree for Uniform Arms and Labels
+  # Use branch.length = 'none' for uniform arm style (phylogram)
+  p <- ggtree(phy, branch.length = "none") + 
+    # Add Tip Labels
+    geom_tiplab(size = 3) +
+    
+    # FIX: Use branch.length from the ggtree data object for labels.
+    # When ggtree processes the tree, it includes the original branch lengths 
+    # in the data frame, and we can access them directly by name.
+    geom_label2(aes(subset = !isTip, label = round(branch.length, 3)),
+                size = 2.5,
+                fill = "white",
+                label.padding = unit(0.15, "lines"),
+                hjust = 0) + # Position the label near the node
+    
+    # Title and Theme
+    ggtitle(paste0("Dendrogram (", toupper(method), ") collapsed by '", group_var, "'")) +
+    theme_tree2()
+  
+  # 4. Optional: Adjust X-axis for label visibility
+  # max_depth calculates depth based on *number of nodes*, not branch lengths
+  max_depth <- max(node.depth(phy))
+  p <- p + xlim(NA, max_depth + 2) # Add padding to the right
+  
+  return(p)
+}
+
+# Example Usage
+plot_grouped_dendrogram_final(ps_ssp, "Age_species", method = "wunifrac")
