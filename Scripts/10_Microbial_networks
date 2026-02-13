@@ -1,0 +1,412 @@
+# build co-occurrence networks
+
+library(phyloseq)
+library(dplyr)
+
+# 1. Collapse to genus level _we already had ps_genus, but I'm doing it again just to be safe
+ps_genus <- tax_glom(ps, taxrank = "Genus")
+ps_genus <- subset_taxa(ps_genus, !is.na(Genus) & Genus != "")
+
+# 2. Extract counts and metadata
+otu <- as(otu_table(ps_genus), "matrix")
+if(taxa_are_rows(ps_genus)) otu <- t(otu) # ensure samples in rows
+otu <- as.data.frame(otu)
+
+# sample read depths for rel.abundance
+sample_totals <- rowSums(otu)
+
+# 3. Compute per-genus stats
+taxa_stats <- data.frame(
+  Genus = tax_table(ps_genus)[, "Genus"],
+  total_count = colSums(otu),
+  prevalence = colSums(otu > 0) / nrow(otu),
+  max_rel_ab = apply(otu, 2, function(x) max(x / sample_totals))
+)
+
+# 4. Apply hybrid filter
+prevalence_cut <- 0.15   # ≥15% of samples
+max_rel_ab_cut <- 0.001  # ≥0.1% in ≥1 sample
+total_count_cut <- 50    # ≥50 reads total
+
+taxa_stats <- taxa_stats %>%
+  mutate(
+    keep = (prevalence >= prevalence_cut |
+              max_rel_ab >= max_rel_ab_cut |
+              total_count >= total_count_cut)
+  )
+
+# 5. Report summary
+cat("Initial genera:", nrow(taxa_stats), "\n")
+cat("Genera retained:", sum(taxa_stats$keep), "\n")
+cat("Genera removed:", sum(!taxa_stats$keep), "\n")
+
+# List genera kept *only* because of max_rel_abundance rule
+kept_by_max_only <- taxa_stats %>%
+  filter(keep,
+         prevalence < prevalence_cut,
+         total_count < total_count_cut,
+         max_rel_ab >= max_rel_ab_cut)
+cat("Genera kept ONLY by max_rel_abundance rule:\n")
+print(kept_by_max_only[, c("Genus","max_rel_ab")])
+
+# 6. Create filtered phyloseq object
+genera_to_keep <- rownames(taxa_stats)[taxa_stats$keep]
+ps_filtered <- prune_taxa(genera_to_keep, ps_genus)
+ps_filtered
+
+
+
+###### Now running spieceasi
+
+library(phyloseq)
+library(SpiecEasi)
+library(Matrix)
+library(igraph)
+
+# Extract filtered counts
+otu_table_filtered <- as(otu_table(ps_filtered), "matrix")
+if (taxa_are_rows(ps_filtered)) {
+  otu_table_filtered <- t(otu_table_filtered)
+}
+
+# Check dimensions
+dim(otu_table_filtered)
+
+###seems right, we had 53 taxa and 30 samples
+
+# Run SpiecEasi (MB method is common for microbiome data)
+se.mb <- spiec.easi(
+  otu_table_filtered, 
+  method = "mb",             # Meinshausen-Bühlmann
+  lambda.min.ratio = 1e-2,   # default
+  nlambda = 20,              # number of regularization parameters
+  sel.criterion = "stars",   # stability approach
+  pulsar.params = list(rep.num = 20)  # bootstrap reps
+)
+
+# Extract adjacency matrix
+spiec_adj <- as.matrix(getRefit(se.mb))
+
+# Create igraph object
+spiec_net <- adj2igraph(spiec_adj, vertex.attr = list(name = colnames(otu_table_filtered)))
+
+# Summary
+print(spiec_net)
+
+
+######sparcc
+
+# Run SparCC correlations
+sparcc_res <- SpiecEasi::sparcc(otu_table_filtered)
+
+# Get correlation matrix
+sparcc_cor <- sparcc_res$Cor
+
+# Apply a threshold to keep only strong correlations
+# e.g., |r| > 0.3
+threshold <- 0.3
+sparcc_adj <- abs(sparcc_cor) > threshold
+
+# Build igraph
+sparcc_net <- graph.adjacency(sparcc_adj, mode = "undirected", diag = FALSE)
+V(sparcc_net)$name <- colnames(otu_table_filtered)
+
+# Summary
+print(sparcc_net)
+
+
+
+######compare them
+
+# Get edges as data frames
+edges_spiec <- as.data.frame(get.edgelist(spiec_net))
+edges_sparcc <- as.data.frame(get.edgelist(sparcc_net))
+
+# Add method labels
+edges_spiec$method <- "SpiecEasi"
+edges_sparcc$method <- "SparCC"
+
+# Combine
+edges_combined <- rbind(edges_spiec, edges_sparcc)
+
+# See how many edges overlap
+common_edges <- merge(edges_spiec, edges_sparcc, by = c("V1","V2"))
+cat("Edges in both methods:", nrow(common_edges), "\n")
+
+
+
+##### first look:
+par(mfrow=c(1,2))
+plot(spiec_net, main="SpiecEasi Network", vertex.size=5, vertex.label=NA)
+plot(sparcc_net, main="SparCC Network", vertex.size=5, vertex.label=NA)
+
+
+### add stuff:
+
+# Example metadata (replace with your actual table)
+# Let's say you have genus and phylum for each ASV
+taxa_meta <- data.frame(
+  ASV = taxa_names(ps_filtered),
+  Genus = tax_table(ps_filtered)[, "Genus"],
+  Phylum = tax_table(ps_filtered)[, "Phylum"],
+  stringsAsFactors = FALSE
+)
+
+# Add attributes to SpiecEasi network
+V(spiec_net)$Genus <- taxa_meta$Genus[match(V(spiec_net)$name, taxa_meta$ASV)]
+V(spiec_net)$Phylum <- taxa_meta$Phylum[match(V(spiec_net)$name, taxa_meta$ASV)]
+
+# Same for SparCC
+V(sparcc_net)$Genus <- taxa_meta$Genus[match(V(sparcc_net)$name, taxa_meta$ASV)]
+V(sparcc_net)$Phylum <- taxa_meta$Phylum[match(V(sparcc_net)$name, taxa_meta$ASV)]
+
+
+##merge both networks:
+
+
+library(dplyr)
+
+# Convert edges to dataframes
+edges_spiec <- as.data.frame(as_edgelist(spiec_net))
+edges_sparcc <- as.data.frame(as_edgelist(sparcc_net))
+
+colnames(edges_spiec) <- c("from", "to")
+colnames(edges_sparcc) <- c("from", "to")
+
+# Add method labels
+edges_spiec$method <- "SpiecEasi"
+edges_sparcc$method <- "SparCC"
+
+# Combine all edges
+edges_all <- bind_rows(edges_spiec, edges_sparcc)
+
+# Count how many times each edge appears
+edges_summary <- edges_all %>%
+  group_by(from, to) %>%
+  summarise(weight = n(), methods = paste(unique(method), collapse = ","), .groups = "drop")
+
+# Build merged network
+merged_net <- graph_from_data_frame(
+  d = edges_summary, 
+  vertices = data.frame(name = taxa_names(ps_filtered)), 
+  directed = FALSE
+)
+
+# Add taxonomy metadata
+V(merged_net)$Genus  <- tax_table(ps_filtered)[V(merged_net)$name, "Genus"]
+V(merged_net)$Phylum <- tax_table(ps_filtered)[V(merged_net)$name, "Phylum"]
+
+
+#### export::
+
+# Export edge list with weights
+edges_export <- igraph::as_data_frame(merged_net, what = "edges")
+write.csv(edges_export, "merged_network_edges.csv", row.names = FALSE)
+
+# Export node metadata
+nodes_export <- data.frame(
+  name   = V(merged_net)$name,
+  Genus  = V(merged_net)$Genus,
+  Phylum = V(merged_net)$Phylum
+)
+
+# Calculate degree for all nodes in the merged network
+V(merged_net)$degree <- igraph::degree(merged_net)
+
+# Update your nodes export file
+nodes_export <- data.frame(
+  name   = V(merged_net)$name,
+  Genus  = V(merged_net)$Genus,
+  Phylum = V(merged_net)$Phylum,
+  degree = V(merged_net)$degree # Add the degree column
+)
+
+write.csv(nodes_export, "merged_network_nodes.csv", row.names = FALSE)
+
+
+
+##using cytoscape
+
+
+library(RCy3)
+cytoscapePing()   # should return success
+
+# Paths to your CSV files
+edges_file <- "merged_network_edges.csv"
+nodes_file <- "merged_network_nodes.csv"
+
+# Import network (edges + nodes)
+createNetworkFromDataFrames(
+  edges = read.csv(edges_file),
+  nodes = read.csv(nodes_file),
+  title = "Bee Microbiome Network",
+  collection = "Consensus_Networks"
+)
+
+
+
+# Set edge width proportional to weight (CORRECTED LINE)
+setEdgeLineWidthMapping(
+  table.column = "weight",
+  mapping.type = "d",
+  table.column.values = c(1, 2), # The weights (1 or 2)
+  widths = c(1, 5)              # The corresponding widths
+)
+
+# Set edge color: consensus vs unique
+setEdgeColorMapping("methods",
+                    c("SpiecEasi,SparCC","SpiecEasi","SparCC"),
+                    c("#FF0000","#1f77b4","#2ca02c"),
+                    mapping.type="d")
+
+# Set node color by Phylum
+# Get the unique phyla
+nodes_data <- read.csv(nodes_file)
+phyla <- unique(nodes_data$Phylum)
+num_phyla <- length(phyla)
+
+# Generate colors: Use Set3 if num_phyla <= 12, otherwise use a larger palette
+if (num_phyla <= 12) {
+  colors <- RColorBrewer::brewer.pal(num_phyla, "Set3")
+} else {
+  # If more than 12 colors needed, use a method that cycles or handles more colors
+  # For simplicity, we can use a combination or a different package like 'viridis'
+  # Here, we'll repeat a large palette for a basic fix
+  colors <- rep(RColorBrewer::brewer.pal(12, "Paired"), length.out = num_phyla)
+}
+
+# Apply the mapping, explicitly specifying the style name
+setNodeColorMapping(
+  table.column = "Phylum",
+  table.column.values = phyla,
+  colors = colors,
+  mapping.type = "d",
+  style.name = "default"  # <--- Added this argument
+)
+
+#### set node name to genus
+
+# Corrected code to set node labels to the 'Genus' column
+setNodeLabelMapping(
+  table.column = "Genus",
+  style.name = "default" # Still a good idea to specify the style
+)
+
+
+### highlight hubs
+# Find the min and max degree for the mapping range
+min_degree <- min(V(merged_net)$degree)
+max_degree <- max(V(merged_net)$degree)
+
+# Set node size proportional to degree (hubs will be larger)
+setNodeSizeMapping(
+  table.column = "degree",
+  mapping.type = "c", # Continuous mapping
+  table.column.values = c(min_degree, max_degree),
+  sizes = c(10, 80),  # Map min degree to size 10, max degree to size 80
+  style.name = "default"
+)
+
+
+#### improve layoiut
+
+
+# Apply a commonly used, well-spaced layout
+# This will re-calculate all node positions.
+# NOTE: The name depends on your Cytoscape version, but "force-directed" is standard.
+setNodeLabelMapping(
+  table.column = "Genus",
+  style.name = "default"
+)
+
+# Apply a commonly used, well-spaced layout
+# This will re-calculate all node positions.
+# NOTE: The name depends on your Cytoscape version, but "force-directed" is standard.
+layoutNetwork(layout.name = "force-directed")
+
+
+### getting stats::
+
+# Function to calculate all desired network statistics
+get_network_stats <- function(net, net_name) {
+  # Check if the network is empty
+  if (vcount(net) == 0) {
+    return(data.frame(
+      Network = net_name, Nodes = 0, Edges = 0, Avg_Degree = 0, Density = 0,
+      Avg_Path_Length = NA, Diameter = NA, Transitivity = 0, Modularity = NA
+    ))
+  }
+  
+  # Modularity requires community detection (e.g., Louvain or Fast Greedy)
+  # We use cluster_fast_greedy for consistency with common practices
+  communities <- tryCatch({
+    cluster_fast_greedy(net)
+  }, error = function(e) {
+    message(paste("Warning: Failed to calculate communities for", net_name, ". Error:", e$message))
+    return(NULL)
+  })
+  
+  # Path lengths (Avg Path Length and Diameter) are only meaningful for a *connected* graph.
+  # If the graph is disconnected, mean_distance and diameter will return Infinity or an error.
+  # We will only calculate these if the graph is connected.
+  is_connected <- is.connected(net)
+  
+  if (is_connected) {
+    avg_path_length <- mean_distance(net, directed = FALSE)
+    diameter_val <- diameter(net, directed = FALSE)
+  } else {
+    # If not connected, report NA
+    avg_path_length <- NA
+    diameter_val <- NA
+  }
+  
+  
+  # Calculate Degree and Density
+  nodes <- vcount(net)
+  edges <- ecount(net)
+  avg_degree <- mean(degree(net))
+  density_val <- graph.density(net)
+  
+  # Calculate Transitivity
+  transitivity_val <- transitivity(net, type = "global")
+  
+  # Calculate Modularity
+  modularity_val <- if (!is.null(communities)) {
+    modularity(communities)
+  } else {
+    NA
+  }
+  
+  # Create the results data frame
+  stats_df <- data.frame(
+    Network = net_name,
+    Nodes = nodes,
+    Edges = edges,
+    Avg_Degree = avg_degree,
+    Density = density_val,
+    Avg_Path_Length = avg_path_length,
+    Diameter = diameter_val,
+    Transitivity = transitivity_val,
+    Modularity = modularity_val
+  )
+  
+  return(stats_df)
+}
+
+# 1. SpiecEasi Network
+stats_spiec <- get_network_stats(spiec_net, "SpiecEasi")
+
+# 2. SparCC Network
+# Note: For SparCC, you need to ensure the igraph object only includes edges
+# with the correlation threshold applied, which your previous code does.
+stats_sparcc <- get_network_stats(sparcc_net, "SparCC")
+
+# 3. Merged Network
+# The 'merged_net' you created has weights based on the overlap (1 or 2).
+# We treat the weight as an unweighted connection for these overall stats.
+stats_merged <- get_network_stats(merged_net, "Merged_MB_SparCC")
+
+
+# Combine and print results
+network_stats_table <- rbind(stats_spiec, stats_sparcc, stats_merged)
+print(network_stats_table)
